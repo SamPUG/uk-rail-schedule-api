@@ -29,3 +29,7 @@ stomp_password: ""
 # Can be useful for trimming the database
 #
 #delete_expired_schedules_on_refresh: "no"
+
+# Add TIPLOC filtering to reduce data size. 
+# Only schedules which include these TIPLOCs will be added to the DB
+# filter_tiplocs: []

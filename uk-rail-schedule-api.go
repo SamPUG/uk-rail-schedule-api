@@ -6,6 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"net/http"
+	"os"
+	"strconv"
+	"time"
+
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/render"
@@ -14,15 +20,10 @@ import (
 	"github.com/spf13/viper"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
-	"log/slog"
-	"net/http"
-	"os"
-	"strconv"
-	"time"
 )
 
 type APIStatus struct {
-	Version	   string
+	Version           string
 	ScheduleFileCount int64
 	VSTPCount         int64
 }
@@ -98,6 +99,10 @@ func refreshSchedules(filename string, db *gorm.DB) {
 			schedule := scheduleFeedRecord.JSONScheduleV1.ToSchedule()
 			schedule.AugmentSchedule()
 
+			if !schedule.MatchesFilter() {
+				continue
+			}
+
 			if err := db.Where("combined_id = ?", schedule.CombinedID).First(&existingSchedule).Error; err != nil {
 				schedule.ID = existingSchedule.ID
 			}
@@ -132,7 +137,7 @@ func refreshSchedules(filename string, db *gorm.DB) {
 
 }
 
-// Process a STOMP message	
+// Process a STOMP message
 // This is a blocking function - it will wait until a message is received on the subscription
 // and then process it
 // If there is an error then it will return the error
@@ -149,6 +154,12 @@ func processStompMessage(subscription *stomp.Subscription, db *gorm.DB) error {
 		}
 		schedule := vstpMsg.VSTPCIFMsgV1.VSTPSchedule.ToSchedule()
 		schedule.AugmentSchedule()
+
+		if !schedule.MatchesFilter() {
+			logger.Debug("Schedule does not match filter, skipping insert")
+			return nil
+		}
+
 		logger.Debug("Inserting schedule into db from STOMP message")
 		db.Create(&schedule)
 	} else {
@@ -157,7 +168,6 @@ func processStompMessage(subscription *stomp.Subscription, db *gorm.DB) error {
 	}
 	return nil
 }
-
 
 // Load VSTP data from the VSTP feed
 func loadVSTP(db *gorm.DB) {
@@ -251,6 +261,9 @@ var db *gorm.DB
 // Global logger variable
 var logger *slog.Logger
 
+// Global filter tiplocs variable
+var filterTiplocs []string
+
 // Refreshing the database is a long running process - this variable and the following functions are
 // called when it starts and when it ends
 var refreshingDatabase = false
@@ -304,6 +317,10 @@ func getConfigValue(key string) (value string) {
 	return value
 }
 
+func getFilterTiplocs() []string {
+	return filterTiplocs
+}
+
 // Open the database and create it if it doesn't exist
 func openDB(databaseFilename string) bool {
 	err := errors.New("")
@@ -335,6 +352,7 @@ func main() {
 	viper.SetDefault("log_filename", "")
 	viper.SetDefault("listen_on", "127.0.0.1:3333")
 	viper.SetDefault("delete_expired_schedules_on_refresh", "no")
+	viper.SetDefault("filter_tiplocs", []string{})
 
 	//load in config
 	viper.SetConfigName("config")
@@ -345,6 +363,8 @@ func main() {
 	if err != nil {
 		panic(fmt.Errorf("Fatal error config file: %w", err))
 	}
+
+	filterTiplocs = viper.GetStringSlice("filter_tiplocs")
 
 	var logOutput *os.File
 	if getConfigValue("log_filename") != "" {
@@ -368,6 +388,12 @@ func main() {
 	})
 
 	logger = slog.New(logHandler)
+
+	if len(filterTiplocs) > 0 {
+		logger.Info("Filtering enabled", "filter_tiplocs", filterTiplocs)
+	} else {
+		logger.Info("No filtering enabled")
+	}
 
 	openDB(getDatabaseFilename())
 	go refreshSchedules(getScheduleFeedFilename(), db)
@@ -569,6 +595,8 @@ func dbGetSchedules(identifierType string, identifier string, date string, toc s
 	var start_date int64
 	var end_date int64
 
+	var is_location_filter bool = false
+
 	// Work out what sort of identifier we have (headcode or train uid) and filter by it
 	if identifierType == "headcode" || identifierType == "signallingid" {
 		identifier_filter = fmt.Sprintf("signalling_id = \"%s\"", identifier)
@@ -576,6 +604,11 @@ func dbGetSchedules(identifierType string, identifier string, date string, toc s
 
 	if identifierType == "ciftrainuid" || identifierType == "trainuid" {
 		identifier_filter = fmt.Sprintf("cif_train_uid = \"%s\"", identifier)
+	}
+
+	if identifierType == "tiploc" || identifierType == "location" {
+		is_location_filter = true
+		identifier_filter = fmt.Sprintf("id in (select schedule_id from schedule_locations where schedule_locations.tiploc_code = \"%s\")", identifier)
 	}
 
 	// If we don't have a filter then bail out
@@ -606,7 +639,7 @@ func dbGetSchedules(identifierType string, identifier string, date string, toc s
 	}
 
 	// If we've passed in a specific toc, then filter on it
-	if location != "any" {
+	if location != "any" && !is_location_filter {
 		//need to construct this as a subselect because of a bug in gorm when using joins
 		location_filter = fmt.Sprintf(" and id in (select schedule_id from schedule_locations where schedule_locations.tiploc_code = \"%s\")", location)
 	}

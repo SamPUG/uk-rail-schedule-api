@@ -579,3 +579,19 @@ func (schedule *Schedule) AugmentSchedule() error {
 
 	return nil
 }
+
+// MatchesFilter returns true if any of the ScheduleLocations have a TiplocCode that matches any in the filter list
+// If the filter list is empty, it returns true (no filtering)
+func (s *Schedule) MatchesFilter() bool {
+	if len(filterTiplocs) == 0 {
+		return true
+	}
+	for _, loc := range s.ScheduleLocation {
+		for _, filter := range filterTiplocs {
+			if loc.TiplocCode == filter {
+				return true
+			}
+		}
+	}
+	return false
+}
