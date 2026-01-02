@@ -13,6 +13,8 @@ if [ -z "$UKRA_USERNAME" ] || [ -z "$UKRA_PASSWORD" ]; then
   exit 1
 fi
 
+cd data
+
 curl -L -u "$UKRA_USERNAME:$UKRA_PASSWORD" -o schedule.json.gz 'https://publicdatafeeds.networkrail.co.uk/ntrod/CifFileAuthenticate?type=CIF_ALL_FULL_DAILY&day=toc-full'
 
 # if curl failed to download the file then exit
