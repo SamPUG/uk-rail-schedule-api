@@ -4,8 +4,9 @@
 #stomp_url: "publicdatafeeds.networkrail.co.uk:61618"
 
 # Credentials to access the Network Rail STOMP server
-stomp_login: ""
-stomp_password: ""
+# Leave blank or commented to use ENV variables ($UKRA_USERNAME and $UKRA_PASSWORD)
+# stomp_login: ""
+# stomp_password: ""
 
 # Location of SQLite database - will be created if doesn't exist
 #

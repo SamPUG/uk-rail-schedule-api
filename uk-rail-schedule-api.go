@@ -304,6 +304,12 @@ func getStompConnectionDetails() (url string, login string, password string) {
 	url = getConfigValue("stomp_url")
 	login = getConfigValue("stomp_login")
 	password = getConfigValue("stomp_password")
+	if login == "" {
+		login = os.Getenv("UKRA_USERNAME")
+	}
+	if password == "" {
+		password = os.Getenv("UKRA_PASSWORD")
+	}
 	return url, login, password
 }
 
