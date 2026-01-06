@@ -169,6 +169,113 @@ func processStompMessage(subscription *stomp.Subscription, db *gorm.DB) error {
 	return nil
 }
 
+// Process a TRUST STOMP message
+func processTrustMessage(subscription *stomp.Subscription) error {
+	logger.Debug("Waiting for a TRUST message from STOMP subscription")
+	msg := <-subscription.C
+	if msg != nil && msg.Body != nil {
+		logger.Debug("Got a message from TRUST subscription")
+
+		// TRUST messages come as an array of messages
+		var envelopes []TrustMessageEnvelope
+		if err := json.Unmarshal(msg.Body, &envelopes); err != nil {
+			logger.Error("Error decoding TRUST STOMP message json", "error", err)
+			return err
+		}
+
+		// Process each message in the array
+		for _, envelope := range envelopes {
+			// For non-activation messages, check if we have an activation in the database
+			if envelope.Header.MsgType != "0001" {
+				var count int64
+				db.Model(&TrustActivation{}).Where("train_id = ?", envelope.TrainID).Count(&count)
+				if count == 0 {
+					logger.Debug("TRUST message filtered (no activation)", "train_id", envelope.TrainID, "msg_type", envelope.Header.MsgType)
+					continue
+				}
+			}
+
+			// Parse the message into its specific type
+			parsedMsg, err := ParseTrustMessage(&envelope)
+			if err != nil {
+				logger.Error("Error parsing TRUST message", "error", err, "msg_type", envelope.Header.MsgType)
+				continue
+			}
+
+			// Handle the specific message types and save to database
+			switch typedMsg := parsedMsg.(type) {
+			case TrustActivationMessage:
+				// For activation messages, check if we have a schedule with matching cif_train_uid
+				var count int64
+				db.Model(&Schedule{}).Where("cif_train_uid = ?", typedMsg.Body.TrainUID).Count(&count)
+				if count == 0 {
+					logger.Debug("TRUST Activation filtered (no schedule)", "train_uid", typedMsg.Body.TrainUID)
+					continue
+				}
+
+				activation := typedMsg.ToTrustActivation()
+				db.Create(&activation)
+				logger.Debug("TRUST Activation saved",
+					"train_id", typedMsg.Body.TrainID,
+					"train_uid", typedMsg.Body.TrainUID,
+					"origin_stanox", typedMsg.Body.TPOriginStanox)
+
+			case TrustCancellationMessage:
+				cancellation := typedMsg.ToTrustCancellation()
+				db.Create(&cancellation)
+				logger.Debug("TRUST Cancellation saved",
+					"train_id", typedMsg.Body.TrainID,
+					"reason_code", typedMsg.Body.CanxReasonCode)
+
+			case TrustMovementMessage:
+				movement := typedMsg.ToTrustMovement()
+				db.Create(&movement)
+				logger.Debug("TRUST Movement saved",
+					"train_id", typedMsg.Body.TrainID,
+					"event_type", typedMsg.Body.EventType,
+					"loc_stanox", typedMsg.Body.LocStanox,
+					"variation", typedMsg.Body.TimetableVariation,
+					"status", typedMsg.Body.VariationStatus)
+
+			case TrustReinstatementMessage:
+				reinstatement := typedMsg.ToTrustReinstatement()
+				db.Create(&reinstatement)
+				logger.Debug("TRUST Reinstatement saved", "train_id", typedMsg.Body.TrainID)
+
+			case TrustChangeOfOriginMessage:
+				changeOfOrigin := typedMsg.ToTrustChangeOfOrigin()
+				db.Create(&changeOfOrigin)
+				logger.Debug("TRUST Change of Origin saved",
+					"train_id", typedMsg.Body.TrainID,
+					"new_origin_stanox", typedMsg.Body.LocStanox)
+
+			case TrustChangeOfIdentityMessage:
+				changeOfIdentity := typedMsg.ToTrustChangeOfIdentity()
+				db.Create(&changeOfIdentity)
+				logger.Debug("TRUST Change of Identity saved",
+					"train_id", typedMsg.Body.TrainID,
+					"revised_train_id", typedMsg.Body.RevisedTrainID)
+
+			case TrustChangeOfLocationMessage:
+				changeOfLocation := typedMsg.ToTrustChangeOfLocation()
+				db.Create(&changeOfLocation)
+				logger.Debug("TRUST Change of Location saved",
+					"train_id", typedMsg.Body.TrainID,
+					"loc_stanox", typedMsg.Body.LocStanox)
+
+			default:
+				logger.Warn("TRUST message (unknown type)",
+					"msg_type", envelope.Header.MsgType,
+					"train_id", envelope.TrainID)
+			}
+		}
+	} else {
+		logger.Error("TRUST STOMP message body is empty - will stop consuming more messages", "msg", msg)
+		return msg.Err
+	}
+	return nil
+}
+
 // Load VSTP data from the VSTP feed
 func loadVSTP(db *gorm.DB) {
 
@@ -191,7 +298,7 @@ func loadVSTP(db *gorm.DB) {
 			logger.Debug("Dialling a new STOMP connection", "url", url, "username", username)
 
 			stompConn, err = stomp.Dial("tcp", url,
-				stomp.ConnOpt.HeartBeat(10*60*time.Second, 10*60*time.Second),
+				stomp.ConnOpt.HeartBeat(5*time.Second, 5*time.Second),
 				stomp.ConnOpt.Login(username, password))
 
 			// no connection - backoff and retry
@@ -208,7 +315,7 @@ func loadVSTP(db *gorm.DB) {
 
 				defer stompConn.Disconnect()
 
-				sub, err = stompConn.Subscribe("/topic/VSTP_ALL", stomp.AckClient)
+				sub, err = stompConn.Subscribe("/topic/VSTP_ALL", stomp.AckAuto)
 
 				if err != nil {
 					logger.Error("There was an error connecting to STOMP server - disconnecting", "err", err)
@@ -226,6 +333,72 @@ func loadVSTP(db *gorm.DB) {
 
 			if err != nil {
 				logger.Error("There was an error processing message. Disconnecting from STOMP server", "err", err)
+				if sub.Active() {
+					stompConn.Disconnect()
+				}
+				stompConn = nil
+			}
+		}
+	}
+}
+
+// Load TRUST data from the TRUST feed
+func loadTRUST() {
+
+	url, username, password := getStompConnectionDetails()
+	if url == "" {
+		logger.Info("TRUST stomp url is empty - will NOT load from TRUST feed")
+		return
+	}
+
+	var stompConn *stomp.Conn
+	var sub *stomp.Subscription
+	err := errors.New("")
+	timeout := 1
+	max_timeout := 60
+
+	for {
+
+		if stompConn == nil {
+
+			logger.Debug("Dialling a new STOMP connection for TRUST", "url", url, "username", username)
+
+			stompConn, err = stomp.Dial("tcp", url,
+				stomp.ConnOpt.HeartBeat(5*time.Second, 5*time.Second),
+				stomp.ConnOpt.Login(username, password))
+
+			// no connection - backoff and retry
+			if err != nil {
+				logger.Warn(fmt.Sprintf("Could not connect to stomp for TRUST. Pausing for %d seconds before retrying", timeout))
+				time.Sleep(time.Duration(timeout) * time.Second)
+				timeout = timeout * 2
+				if timeout > max_timeout {
+					timeout = max_timeout
+				}
+			}
+
+			if err == nil {
+
+				defer stompConn.Disconnect()
+
+				sub, err = stompConn.Subscribe("/topic/TRAIN_MVT_ALL_TOC", stomp.AckAuto)
+
+				if err != nil {
+					logger.Error("There was an error connecting to STOMP server for TRUST - disconnecting", "err", err)
+					sub.Unsubscribe()
+					stompConn.Disconnect()
+					stompConn = nil
+				}
+
+			}
+		}
+
+		if sub != nil {
+
+			err := processTrustMessage(sub)
+
+			if err != nil {
+				logger.Error("There was an error processing TRUST message. Disconnecting from STOMP server", "err", err)
 				if sub.Active() {
 					stompConn.Disconnect()
 				}
@@ -343,7 +516,10 @@ func openDB(databaseFilename string) bool {
 	}
 
 	if database_is_new {
-		db.AutoMigrate(&ScheduleLocation{}, &Schedule{}, &Tiploc{}, &Timetable{})
+		db.AutoMigrate(&ScheduleLocation{}, &Schedule{}, &Tiploc{}, &Timetable{},
+			&TrustActivation{}, &TrustCancellation{}, &TrustMovement{},
+			&TrustReinstatement{}, &TrustChangeOfOrigin{}, &TrustChangeOfIdentity{},
+			&TrustChangeOfLocation{})
 	}
 
 	return true
@@ -404,6 +580,7 @@ func main() {
 	openDB(getDatabaseFilename())
 	go refreshSchedules(getScheduleFeedFilename(), db)
 	go loadVSTP(db)
+	go loadTRUST()
 
 	// OK we've got this far and have a valid database - let's serve some requests
 	r := chi.NewRouter()
