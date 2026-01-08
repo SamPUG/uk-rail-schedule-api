@@ -65,6 +65,11 @@ type Schedule struct {
 	Destination                  string `json:"destination,omitempty"`
 	TimeOfDepartureFromOriginTS  int64  `json:"time_of_departure_from_origin_ts"`
 	TimeOfArrivalAtDestinationTS int64  `json:"time_of_arrival_at_destination_ts"`
+
+	// TRUST activation tracking (not persisted to DB, populated on query)
+	HasActivation      bool `gorm:"-" json:"has_activation,omitempty"`
+	IsTrustCancelled   bool `gorm:"-" json:"is_trust_cancelled,omitempty"`
+	CurrentDelayedMins int  `gorm:"-" json:"current_delayed_mins,omitempty"`
 }
 
 type ScheduleLocation struct {

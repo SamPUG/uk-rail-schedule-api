@@ -876,6 +876,69 @@ func dbGetSchedules(identifierType string, identifier string, date string, toc s
 
 	//add the names of the origin and destination stations to the main schedule object
 	for idx, s := range schedules {
+
+		// Check for TRUST activation matching this schedule for the requested date
+		var activation TrustActivation
+		schedules[idx].HasActivation = false
+		err := db.Where("schedule_key = ? AND creation_timestamp >= ? AND creation_timestamp < ?",
+			schedules[idx].ScheduleKey,
+			strconv.FormatInt(start_date*1000, 10),    // TRUST timestamps are in milliseconds
+			strconv.FormatInt((end_date+1)*1000, 10)). // end_date + 1 second converted to ms
+			First(&activation).Error
+
+		if err == nil {
+			schedules[idx].HasActivation = true
+
+			// Check for cancellations and reinstatements using the train_id
+			var cancellation TrustCancellation
+			var reinstatement TrustReinstatement
+
+			// Find most recent cancellation for this train_id
+			errCanx := db.Where("train_id = ?", activation.TrainID).
+				Order("msg_queue_timestamp DESC").
+				First(&cancellation).Error
+
+			// Find most recent reinstatement for this train_id
+			errReinst := db.Where("train_id = ?", activation.TrainID).
+				Order("msg_queue_timestamp DESC").
+				First(&reinstatement).Error
+
+			// Determine if train is cancelled based on most recent message
+			if errCanx == nil && errReinst == nil {
+				// Both exist - compare timestamps
+				if cancellation.MsgQueueTimestamp > reinstatement.MsgQueueTimestamp {
+					schedules[idx].IsTrustCancelled = true
+				}
+			} else if errCanx == nil {
+				// Only cancellation exists
+				schedules[idx].IsTrustCancelled = true
+			}
+
+			// Check for movements to get delay information
+			var movement TrustMovement
+			errMovement := db.Where("train_id = ?", activation.TrainID).
+				Order("msg_queue_timestamp DESC").
+				First(&movement).Error
+
+			if errMovement == nil {
+				// Parse timetable_variation as integer (it's stored as string)
+				if variation, err := strconv.Atoi(movement.TimetableVariation); err == nil {
+					// Apply sign based on variation_status
+					switch movement.VariationStatus {
+					case "LATE":
+						schedules[idx].CurrentDelayedMins = variation
+					case "EARLY":
+						schedules[idx].CurrentDelayedMins = -variation
+					case "ON TIME":
+						schedules[idx].CurrentDelayedMins = 0
+					default:
+						// Unknown status, treat as on time
+						schedules[idx].CurrentDelayedMins = 0
+					}
+				}
+			}
+		}
+
 		for _, l := range s.ScheduleLocation {
 
 			// LO - Originating location - location where the train service starts from
@@ -902,7 +965,6 @@ func dbGetSchedules(identifierType string, identifier string, date string, toc s
 		if schedules[idx].TimeOfArrivalAtDestinationTS < schedules[idx].TimeOfDepartureFromOriginTS {
 			schedules[idx].TimeOfArrivalAtDestinationTS += 86400
 		}
-
 	}
 
 	if len(schedules) > 0 {
