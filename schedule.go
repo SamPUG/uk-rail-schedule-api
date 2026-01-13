@@ -12,8 +12,6 @@ type Schedule struct {
 	ID uint64 `gorm:"primaryKey"`
 	//Trains are sets of schedules identified by a common UID. A schedule for a specific train service can be uniquely identified by UID, Start Date and STP Indicator. (from https://wiki.openraildata.com/index.php?title=SCHEDULE)
 	CombinedID string `gorm:"index" json:"combined_id"`
-	//ScheduleKey uniquely identifies a schedule: train_uid + schedule_start_date + schedule_type (STP indicator)
-	ScheduleKey string `gorm:"index" json:"schedule_key"`
 	//This is 'Feed' for the schedule feed file, or 'VSTP' for records sourced from VSTP
 	Source string `json:"source,omitempty"`
 
@@ -583,7 +581,6 @@ func (schedule *Schedule) AugmentSchedule() error {
 	}
 
 	schedule.CombinedID = schedule.CIFTrainUID + schedule.ScheduleStartDate + schedule.CIFStpIndicator
-	schedule.ScheduleKey = schedule.CIFTrainUID + "_" + schedule.ScheduleStartDate + "_" + schedule.CIFStpIndicator
 
 	return nil
 }

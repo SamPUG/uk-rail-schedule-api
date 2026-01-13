@@ -272,7 +272,7 @@ type TrustActivation struct {
 	TrainID            string `gorm:"index"`
 	MsgQueueTimestamp  string
 	TrainUID           string `gorm:"index"`
-	ScheduleKey        string `gorm:"index"` // Links to Schedule: train_uid|schedule_start_date|schedule_type
+	CombinedID         string `gorm:"index"` // Links to Schedule: train_uid + schedule_start_date + schedule_type
 	ScheduleSource     string
 	TrainFileAddress   string
 	ScheduleEndDate    string
@@ -424,7 +424,7 @@ func (m *TrustActivationMessage) ToTrustActivation() TrustActivation {
 		TrainID:            m.Body.TrainID,
 		MsgQueueTimestamp:  m.Header.MsgQueueTimestamp,
 		TrainUID:           m.Body.TrainUID,
-		ScheduleKey:        m.Body.TrainUID + "_" + m.Body.ScheduleStartDate + "_" + correctedScheduleType,
+		CombinedID:         m.Body.TrainUID + m.Body.ScheduleStartDate + correctedScheduleType,
 		ScheduleSource:     m.Body.ScheduleSource,
 		TrainFileAddress:   m.Body.TrainFileAddress,
 		ScheduleEndDate:    m.Body.ScheduleEndDate,

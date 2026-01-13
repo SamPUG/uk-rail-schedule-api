@@ -962,8 +962,8 @@ func dbGetSchedules(identifierType string, identifier string, date string, toc s
 		// Check for TRUST activation matching this schedule for the requested date
 		var activation TrustActivation
 		schedules[idx].HasActivation = false
-		err := db.Where("schedule_key = ? AND origin_dep_timestamp >= ? AND origin_dep_timestamp < ?",
-			schedules[idx].ScheduleKey,
+		err := db.Where("combined_id = ? AND origin_dep_timestamp >= ? AND origin_dep_timestamp < ?",
+			schedules[idx].CombinedID,
 			strconv.FormatInt(start_date*1000, 10),    // TRUST timestamps are in milliseconds
 			strconv.FormatInt((end_date+1)*1000, 10)). // end_date + 1 second converted to ms
 			First(&activation).Error
