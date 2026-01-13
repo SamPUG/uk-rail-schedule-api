@@ -12,3 +12,4 @@
 !*.go
 !*.sh
 !Dockerfile
+!.devcontainer/devcontainer.json
