@@ -850,6 +850,63 @@ func dbGetSchedules(identifierType string, identifier string, date string, toc s
 		return nil, errors.New("There was an error running the sql to get the schedules: " + sqlError.Error())
 	}
 
+	// When filtering by location, also check for schedules from the previous day that might pass through the location on the requested day
+	if is_location_filter {
+		var prevDaySchedules []Schedule
+		prev_start_date := start_date - 86400
+		prev_end_date := prev_start_date + 86399
+		prev_dow := dow - 1
+		if prev_dow == 0 {
+			prev_dow = 7
+		}
+		prev_day_filter := fmt.Sprintf(" and substr(schedule_days_runs, %d, 1) = \"1\" ", prev_dow)
+
+		sqlError = db.Raw("SELECT * FROM schedules WHERE (cif_stp_indicator = 'P' or cif_stp_indicator = 'N') AND "+identifier_filter+" AND schedule_start_date_ts <= ? AND schedule_end_date_ts >= ? "+prev_day_filter+atoc_filter+location_filter, prev_start_date, prev_end_date).Scan(&prevDaySchedules).Error
+
+		if sqlError != nil {
+			return nil, errors.New("There was an error running the sql to get the previous day schedules: " + sqlError.Error())
+		}
+
+		// Load schedule locations for previous day schedules
+		for idx := range prevDaySchedules {
+			db.Find(&prevDaySchedules[idx].ScheduleLocation, "schedule_id = ?", prevDaySchedules[idx].ID)
+		}
+
+		// Filter to only include schedules that cross over into the requested day
+		// If the location stop time is before the origin departure time, the schedule crosses midnight
+		for _, prevSched := range prevDaySchedules {
+			// Find the origin departure time
+			var originDepartureTime int64
+			for _, loc := range prevSched.ScheduleLocation {
+				if loc.RecordIdentity == "LO" || loc.RecordIdentity == "TB" {
+					originDepartureTime, _ = combineDateAndTime(prev_start_date, loc.Departure)
+					break
+				}
+			}
+
+			// Check if the requested location has a stop time before the origin departure
+			for _, loc := range prevSched.ScheduleLocation {
+				if loc.TiplocCode == identifier {
+					var locationTime int64
+					var err error
+					if loc.Arrival != "" {
+						locationTime, err = combineDateAndTime(prev_start_date, loc.Arrival)
+					} else if loc.Pass != "" {
+						locationTime, err = combineDateAndTime(prev_start_date, loc.Pass)
+					} else if loc.Departure != "" {
+						locationTime, err = combineDateAndTime(prev_start_date, loc.Departure)
+					}
+
+					// If location time is before origin time, it crosses midnight
+					if err == nil && locationTime < originDepartureTime {
+						schedules = append(schedules, prevSched)
+						break
+					}
+				}
+			}
+		}
+	}
+
 	/* Because we used raw sql in the above query we didn't automatically load the schedule locations. This does that */
 	for idx := range schedules {
 		db.Find(&schedules[idx].ScheduleLocation, "schedule_id = ?", schedules[idx].ID)
@@ -862,6 +919,31 @@ func dbGetSchedules(identifierType string, identifier string, date string, toc s
 
 	if sqlError != nil {
 		return nil, errors.New("There was an error running the sql to get the overlays: " + sqlError.Error())
+	}
+
+	// When filtering by location, also get overlays from the previous day
+	if is_location_filter {
+		var prevDayOverlays []Schedule
+		prev_start_date := start_date - 86400
+		prev_end_date := prev_start_date + 86399
+		prev_dow := dow - 1
+		if prev_dow == 0 {
+			prev_dow = 7
+		}
+		prev_day_filter := fmt.Sprintf(" and substr(schedule_days_runs, %d, 1) = \"1\" ", prev_dow)
+
+		sqlError = db.Raw("SELECT * FROM schedules WHERE source=\"VSTP\" AND (cif_stp_indicator = 'O' or cif_stp_indicator = 'C') AND "+identifier_filter+" AND schedule_start_date_ts <= ? AND schedule_end_date_ts >= ? "+prev_day_filter+atoc_filter+location_filter, prev_start_date, prev_end_date).Scan(&prevDayOverlays).Error
+
+		if sqlError != nil {
+			return nil, errors.New("There was an error running the sql to get the previous day overlays: " + sqlError.Error())
+		}
+
+		// Load schedule locations for previous day overlays
+		for idx := range prevDayOverlays {
+			db.Find(&prevDayOverlays[idx].ScheduleLocation, "schedule_id = ?", prevDayOverlays[idx].ID)
+		}
+
+		overlays = append(overlays, prevDayOverlays...)
 	}
 
 	/* Because we used raw sql in the above query we didn't automatically load the schedule locations. This does that */
@@ -880,7 +962,7 @@ func dbGetSchedules(identifierType string, identifier string, date string, toc s
 		// Check for TRUST activation matching this schedule for the requested date
 		var activation TrustActivation
 		schedules[idx].HasActivation = false
-		err := db.Where("schedule_key = ? AND creation_timestamp >= ? AND creation_timestamp < ?",
+		err := db.Where("schedule_key = ? AND origin_dep_timestamp >= ? AND origin_dep_timestamp < ?",
 			schedules[idx].ScheduleKey,
 			strconv.FormatInt(start_date*1000, 10),    // TRUST timestamps are in milliseconds
 			strconv.FormatInt((end_date+1)*1000, 10)). // end_date + 1 second converted to ms

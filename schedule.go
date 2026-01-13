@@ -11,9 +11,9 @@ import (
 type Schedule struct {
 	ID uint64 `gorm:"primaryKey"`
 	//Trains are sets of schedules identified by a common UID. A schedule for a specific train service can be uniquely identified by UID, Start Date and STP Indicator. (from https://wiki.openraildata.com/index.php?title=SCHEDULE)
-	CombinedID string `gorm:"index"`
+	CombinedID string `gorm:"index" json:"combined_id"`
 	//ScheduleKey uniquely identifies a schedule: train_uid + schedule_start_date + schedule_type (STP indicator)
-	ScheduleKey string `gorm:"index"`
+	ScheduleKey string `gorm:"index" json:"schedule_key"`
 	//This is 'Feed' for the schedule feed file, or 'VSTP' for records sourced from VSTP
 	Source string `json:"source,omitempty"`
 
@@ -67,9 +67,9 @@ type Schedule struct {
 	TimeOfArrivalAtDestinationTS int64  `json:"time_of_arrival_at_destination_ts"`
 
 	// TRUST activation tracking (not persisted to DB, populated on query)
-	HasActivation      bool `gorm:"-" json:"has_activation,omitempty"`
-	IsTrustCancelled   bool `gorm:"-" json:"is_trust_cancelled,omitempty"`
-	CurrentDelayedMins int  `gorm:"-" json:"current_delayed_mins,omitempty"`
+	HasActivation      bool `gorm:"-" json:"has_activation"`
+	IsTrustCancelled   bool `gorm:"-" json:"is_trust_cancelled"`
+	CurrentDelayedMins int  `gorm:"-" json:"current_delayed_mins"`
 }
 
 type ScheduleLocation struct {
