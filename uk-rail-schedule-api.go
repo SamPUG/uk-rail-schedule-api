@@ -79,6 +79,7 @@ func refreshSchedules(filename string, db *gorm.DB) {
 	tiplocs := []Tiploc{}
 
 	var existingSchedule Schedule
+	batchSize := 500
 
 	// Iterate over each line in the file
 	for scanner.Scan() {
@@ -108,16 +109,20 @@ func refreshSchedules(filename string, db *gorm.DB) {
 			}
 
 			schedules = append(schedules, schedule)
-			if len(schedules) == 10 {
-				db.Save(&schedules)
+			if len(schedules) >= batchSize {
+				db.Transaction(func(tx *gorm.DB) error {
+					return tx.Save(&schedules).Error
+				})
 				schedules = nil
 			}
 		}
 
 		if scheduleFeedRecord.IsTiploc() {
 			tiplocs = append(tiplocs, scheduleFeedRecord.Tiploc)
-			if len(tiplocs) == 10 {
-				db.Save(&tiplocs)
+			if len(tiplocs) >= batchSize {
+				db.Transaction(func(tx *gorm.DB) error {
+					return tx.Save(&tiplocs).Error
+				})
 				tiplocs = nil
 			}
 		}
@@ -125,11 +130,15 @@ func refreshSchedules(filename string, db *gorm.DB) {
 	}
 
 	if len(schedules) > 0 {
-		db.Save(&schedules)
+		db.Transaction(func(tx *gorm.DB) error {
+			return tx.Save(&schedules).Error
+		})
 	}
 
 	if len(tiplocs) > 0 {
-		db.Save(&tiplocs)
+		db.Transaction(func(tx *gorm.DB) error {
+			return tx.Save(&tiplocs).Error
+		})
 	}
 
 	// lets insert the latest timetable
@@ -150,6 +159,8 @@ func processStompMessage(subscription *stomp.Subscription, db *gorm.DB) error {
 		os.WriteFile("/tmp/vstp-msg.json", msg.Body, 0644)
 		if err := json.Unmarshal(msg.Body, &vstpMsg); err != nil {
 			logger.Error("Error decoding STOMP message json", "error", err, "msg.Body", msg.Body)
+			// Ack the message even on error to avoid reprocessing bad messages
+			msg.Conn.Ack(msg)
 			return err
 		}
 		schedule := vstpMsg.VSTPCIFMsgV1.VSTPSchedule.ToSchedule()
@@ -157,11 +168,15 @@ func processStompMessage(subscription *stomp.Subscription, db *gorm.DB) error {
 
 		if !schedule.MatchesFilter() {
 			logger.Debug("Schedule does not match filter, skipping insert")
+			// Ack the message even when filtered
+			msg.Conn.Ack(msg)
 			return nil
 		}
 
 		logger.Debug("Inserting schedule into db from STOMP message")
 		db.Create(&schedule)
+		// Ack the message after successful processing
+		msg.Conn.Ack(msg)
 	} else {
 		logger.Error("STOMP message body is empty - will stop consuming more messages", "msg", msg)
 		return msg.Err
@@ -180,6 +195,8 @@ func processTrustMessage(subscription *stomp.Subscription) error {
 		var envelopes []TrustMessageEnvelope
 		if err := json.Unmarshal(msg.Body, &envelopes); err != nil {
 			logger.Error("Error decoding TRUST STOMP message json", "error", err)
+			// Ack the message even on error to avoid reprocessing bad messages
+			msg.Conn.Ack(msg)
 			return err
 		}
 
@@ -269,6 +286,8 @@ func processTrustMessage(subscription *stomp.Subscription) error {
 					"train_id", envelope.TrainID)
 			}
 		}
+		// Ack the message after successful processing of all envelopes
+		msg.Conn.Ack(msg)
 	} else {
 		logger.Error("TRUST STOMP message body is empty - will stop consuming more messages", "msg", msg)
 		return msg.Err
@@ -313,9 +332,10 @@ func loadVSTP(db *gorm.DB) {
 
 			if err == nil {
 
-				defer stompConn.Disconnect()
-
-				sub, err = stompConn.Subscribe("/topic/VSTP_ALL", stomp.AckAuto)
+				subscriptionID := fmt.Sprintf("%s-vstp", getSubscriptionID())
+				logger.Debug("Subscribing to VSTP feed", "subscription_id", subscriptionID)
+				sub, err = stompConn.Subscribe("/topic/VSTP_ALL", stomp.AckClient,
+					stomp.SubscribeOpt.Id(subscriptionID))
 
 				if err != nil {
 					logger.Error("There was an error connecting to STOMP server - disconnecting", "err", err)
@@ -323,7 +343,6 @@ func loadVSTP(db *gorm.DB) {
 					stompConn.Disconnect()
 					stompConn = nil
 				}
-
 			}
 		}
 
@@ -334,8 +353,9 @@ func loadVSTP(db *gorm.DB) {
 			if err != nil {
 				logger.Error("There was an error processing message. Disconnecting from STOMP server", "err", err)
 				if sub.Active() {
-					stompConn.Disconnect()
+					sub.Unsubscribe()
 				}
+				stompConn.Disconnect()
 				stompConn = nil
 			}
 		}
@@ -379,9 +399,10 @@ func loadTRUST() {
 
 			if err == nil {
 
-				defer stompConn.Disconnect()
-
-				sub, err = stompConn.Subscribe("/topic/TRAIN_MVT_ALL_TOC", stomp.AckAuto)
+				subscriptionID := fmt.Sprintf("%s-trust", getSubscriptionID())
+				logger.Debug("Subscribing to TRUST feed", "subscription_id", subscriptionID)
+				sub, err = stompConn.Subscribe("/topic/TRAIN_MVT_ALL_TOC", stomp.AckClient,
+					stomp.SubscribeOpt.Id(subscriptionID))
 
 				if err != nil {
 					logger.Error("There was an error connecting to STOMP server for TRUST - disconnecting", "err", err)
@@ -389,7 +410,6 @@ func loadTRUST() {
 					stompConn.Disconnect()
 					stompConn = nil
 				}
-
 			}
 		}
 
@@ -400,8 +420,9 @@ func loadTRUST() {
 			if err != nil {
 				logger.Error("There was an error processing TRUST message. Disconnecting from STOMP server", "err", err)
 				if sub.Active() {
-					stompConn.Disconnect()
+					sub.Unsubscribe()
 				}
+				stompConn.Disconnect()
 				stompConn = nil
 			}
 		}
@@ -500,6 +521,10 @@ func getFilterTiplocs() []string {
 	return filterTiplocs
 }
 
+func getSubscriptionID() string {
+	return getConfigValue("subscription_id")
+}
+
 // Open the database and create it if it doesn't exist
 func openDB(databaseFilename string) bool {
 	err := errors.New("")
@@ -510,10 +535,19 @@ func openDB(databaseFilename string) bool {
 		logger.Info("Database doesn't exist - creating", "databaseFilename", databaseFilename)
 	}
 
-	db, err = gorm.Open(sqlite.Open(databaseFilename), &gorm.Config{})
+	// Enable WAL mode and set busy timeout for better concurrency
+	db, err = gorm.Open(sqlite.Open(databaseFilename+"?_busy_timeout=5000&_journal_mode=WAL"), &gorm.Config{})
 	if err != nil {
 		panic("failed to connect database")
 	}
+
+	// Configure connection pool
+	sqlDB, err := db.DB()
+	if err != nil {
+		panic("failed to get database instance")
+	}
+	sqlDB.SetMaxOpenConns(1) // SQLite works best with 1 writer
+	sqlDB.SetMaxIdleConns(1)
 
 	if database_is_new {
 		db.AutoMigrate(&ScheduleLocation{}, &Schedule{}, &Tiploc{}, &Timetable{},
@@ -532,9 +566,11 @@ func main() {
 	viper.SetDefault("database", "ukra.db")
 	viper.SetDefault("schedule_feed_filename", "schedule.json")
 	viper.SetDefault("log_filename", "")
-	viper.SetDefault("listen_on", "127.0.0.1:3333")
+	viper.SetDefault("log_level", "INFO")
+	viper.SetDefault("listen_on", "0.0.0.0:3333")
 	viper.SetDefault("delete_expired_schedules_on_refresh", "no")
 	viper.SetDefault("filter_tiplocs", []string{})
+	viper.SetDefault("subscription_id", "ukra")
 
 	//load in config
 	viper.SetConfigName("config")
@@ -564,8 +600,23 @@ func main() {
 
 	}
 
+	// Parse log level from config
+	var logLevel slog.Level
+	switch getConfigValue("log_level") {
+	case "DEBUG":
+		logLevel = slog.LevelDebug
+	case "INFO":
+		logLevel = slog.LevelInfo
+	case "WARN":
+		logLevel = slog.LevelWarn
+	case "ERROR":
+		logLevel = slog.LevelError
+	default:
+		logLevel = slog.LevelInfo
+	}
+
 	logHandler := slog.NewTextHandler(logOutput, &slog.HandlerOptions{
-		Level:     slog.LevelDebug,
+		Level:     logLevel,
 		AddSource: true,
 	})
 
@@ -850,63 +901,6 @@ func dbGetSchedules(identifierType string, identifier string, date string, toc s
 		return nil, errors.New("There was an error running the sql to get the schedules: " + sqlError.Error())
 	}
 
-	// When filtering by location, also check for schedules from the previous day that might pass through the location on the requested day
-	if is_location_filter {
-		var prevDaySchedules []Schedule
-		prev_start_date := start_date - 86400
-		prev_end_date := prev_start_date + 86399
-		prev_dow := dow - 1
-		if prev_dow == 0 {
-			prev_dow = 7
-		}
-		prev_day_filter := fmt.Sprintf(" and substr(schedule_days_runs, %d, 1) = \"1\" ", prev_dow)
-
-		sqlError = db.Raw("SELECT * FROM schedules WHERE (cif_stp_indicator = 'P' or cif_stp_indicator = 'N') AND "+identifier_filter+" AND schedule_start_date_ts <= ? AND schedule_end_date_ts >= ? "+prev_day_filter+atoc_filter+location_filter, prev_start_date, prev_end_date).Scan(&prevDaySchedules).Error
-
-		if sqlError != nil {
-			return nil, errors.New("There was an error running the sql to get the previous day schedules: " + sqlError.Error())
-		}
-
-		// Load schedule locations for previous day schedules
-		for idx := range prevDaySchedules {
-			db.Find(&prevDaySchedules[idx].ScheduleLocation, "schedule_id = ?", prevDaySchedules[idx].ID)
-		}
-
-		// Filter to only include schedules that cross over into the requested day
-		// If the location stop time is before the origin departure time, the schedule crosses midnight
-		for _, prevSched := range prevDaySchedules {
-			// Find the origin departure time
-			var originDepartureTime int64
-			for _, loc := range prevSched.ScheduleLocation {
-				if loc.RecordIdentity == "LO" || loc.RecordIdentity == "TB" {
-					originDepartureTime, _ = combineDateAndTime(prev_start_date, loc.Departure)
-					break
-				}
-			}
-
-			// Check if the requested location has a stop time before the origin departure
-			for _, loc := range prevSched.ScheduleLocation {
-				if loc.TiplocCode == identifier {
-					var locationTime int64
-					var err error
-					if loc.Arrival != "" {
-						locationTime, err = combineDateAndTime(prev_start_date, loc.Arrival)
-					} else if loc.Pass != "" {
-						locationTime, err = combineDateAndTime(prev_start_date, loc.Pass)
-					} else if loc.Departure != "" {
-						locationTime, err = combineDateAndTime(prev_start_date, loc.Departure)
-					}
-
-					// If location time is before origin time, it crosses midnight
-					if err == nil && locationTime < originDepartureTime {
-						schedules = append(schedules, prevSched)
-						break
-					}
-				}
-			}
-		}
-	}
-
 	/* Because we used raw sql in the above query we didn't automatically load the schedule locations. This does that */
 	for idx := range schedules {
 		db.Find(&schedules[idx].ScheduleLocation, "schedule_id = ?", schedules[idx].ID)
@@ -915,35 +909,10 @@ func dbGetSchedules(identifierType string, identifier string, date string, toc s
 
 	var overlays []Schedule
 
-	sqlError = db.Raw("SELECT * FROM schedules WHERE source=\"VSTP\" AND (cif_stp_indicator = 'O' or cif_stp_indicator = 'C') AND "+identifier_filter+" AND schedule_start_date_ts <= ? AND schedule_end_date_ts >= ? "+day_filter+atoc_filter+location_filter, start_date, end_date).Scan(&overlays).Error
+	sqlError = db.Raw("SELECT * FROM schedules WHERE (cif_stp_indicator = 'O' or cif_stp_indicator = 'C') AND "+identifier_filter+" AND schedule_start_date_ts <= ? AND schedule_end_date_ts >= ? "+day_filter+atoc_filter+location_filter, start_date, end_date).Scan(&overlays).Error
 
 	if sqlError != nil {
 		return nil, errors.New("There was an error running the sql to get the overlays: " + sqlError.Error())
-	}
-
-	// When filtering by location, also get overlays from the previous day
-	if is_location_filter {
-		var prevDayOverlays []Schedule
-		prev_start_date := start_date - 86400
-		prev_end_date := prev_start_date + 86399
-		prev_dow := dow - 1
-		if prev_dow == 0 {
-			prev_dow = 7
-		}
-		prev_day_filter := fmt.Sprintf(" and substr(schedule_days_runs, %d, 1) = \"1\" ", prev_dow)
-
-		sqlError = db.Raw("SELECT * FROM schedules WHERE source=\"VSTP\" AND (cif_stp_indicator = 'O' or cif_stp_indicator = 'C') AND "+identifier_filter+" AND schedule_start_date_ts <= ? AND schedule_end_date_ts >= ? "+prev_day_filter+atoc_filter+location_filter, prev_start_date, prev_end_date).Scan(&prevDayOverlays).Error
-
-		if sqlError != nil {
-			return nil, errors.New("There was an error running the sql to get the previous day overlays: " + sqlError.Error())
-		}
-
-		// Load schedule locations for previous day overlays
-		for idx := range prevDayOverlays {
-			db.Find(&prevDayOverlays[idx].ScheduleLocation, "schedule_id = ?", prevDayOverlays[idx].ID)
-		}
-
-		overlays = append(overlays, prevDayOverlays...)
 	}
 
 	/* Because we used raw sql in the above query we didn't automatically load the schedule locations. This does that */

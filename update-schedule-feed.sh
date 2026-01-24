@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 #
 # This script downloads the latest schedule feed from Network Rail and refreshes
 # the database with the new data.

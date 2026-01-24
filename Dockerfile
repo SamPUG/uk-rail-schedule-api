@@ -3,6 +3,9 @@ FROM golang:1.21-alpine AS builder
 
 WORKDIR /app
 
+# Install build dependencies for CGO/SQLite
+RUN apk add --no-cache gcc musl-dev sqlite-dev
+
 # Copy go mod files
 COPY go.mod go.sum ./
 RUN go mod download
@@ -10,8 +13,8 @@ RUN go mod download
 # Copy source code
 COPY . .
 
-# Build the application with CGO enabled for SQLite
-RUN CGO_ENABLED=1 GOOS=linux go build -a -installsuffix cgo -o uk-rail-schedule-api .
+# Build the application (musl doesn't have pread64/pwrite64, so disable them)
+RUN CGO_CFLAGS="-D_LARGEFILE64_SOURCE" go build -o uk-rail-schedule-api .
 
 # Runtime stage
 FROM alpine:latest
@@ -52,6 +55,9 @@ RUN chmod +x start.sh
 
 # Expose port
 EXPOSE 3333
+
+# Ensure we're in the app directory when running
+WORKDIR /app
 
 # Set entrypoint
 CMD ["/app/start.sh"]
