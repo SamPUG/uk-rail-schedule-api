@@ -309,6 +309,8 @@ func loadVSTP(db *gorm.DB) {
 	err := errors.New("")
 	timeout := 1
 	max_timeout := 60
+	retryCount := 0
+	maxRetries := 5
 
 	for {
 
@@ -322,7 +324,12 @@ func loadVSTP(db *gorm.DB) {
 
 			// no connection - backoff and retry
 			if err != nil {
-				logger.Warn(fmt.Sprintf("Could not connect to stomp. Pausing for %d seconds before retrying", timeout))
+				retryCount++
+				logger.Warn(fmt.Sprintf("Could not connect to stomp (attempt %d/%d). Pausing for %d seconds before retrying", retryCount, maxRetries, timeout))
+				if retryCount >= maxRetries {
+					logger.Error("Failed to connect to VSTP STOMP after maximum retries. Exiting.", "error", err)
+					os.Exit(1)
+				}
 				time.Sleep(time.Duration(timeout) * time.Second)
 				timeout = timeout * 2
 				if timeout > max_timeout {
@@ -331,6 +338,9 @@ func loadVSTP(db *gorm.DB) {
 			}
 
 			if err == nil {
+				// Reset retry counter on successful connection
+				retryCount = 0
+				timeout = 1
 
 				subscriptionID := fmt.Sprintf("%s-vstp", getSubscriptionID())
 				logger.Debug("Subscribing to VSTP feed", "subscription_id", subscriptionID)
@@ -376,6 +386,8 @@ func loadTRUST() {
 	err := errors.New("")
 	timeout := 1
 	max_timeout := 60
+	retryCount := 0
+	maxRetries := 5
 
 	for {
 
@@ -389,7 +401,12 @@ func loadTRUST() {
 
 			// no connection - backoff and retry
 			if err != nil {
-				logger.Warn(fmt.Sprintf("Could not connect to stomp for TRUST. Pausing for %d seconds before retrying", timeout))
+				retryCount++
+				logger.Warn(fmt.Sprintf("Could not connect to stomp for TRUST (attempt %d/%d). Pausing for %d seconds before retrying", retryCount, maxRetries, timeout))
+				if retryCount >= maxRetries {
+					logger.Error("Failed to connect to TRUST STOMP after maximum retries. Exiting.", "error", err)
+					os.Exit(1)
+				}
 				time.Sleep(time.Duration(timeout) * time.Second)
 				timeout = timeout * 2
 				if timeout > max_timeout {
@@ -398,6 +415,9 @@ func loadTRUST() {
 			}
 
 			if err == nil {
+				// Reset retry counter on successful connection
+				retryCount = 0
+				timeout = 1
 
 				subscriptionID := fmt.Sprintf("%s-trust", getSubscriptionID())
 				logger.Debug("Subscribing to TRUST feed", "subscription_id", subscriptionID)
@@ -925,7 +945,6 @@ func dbGetSchedules(identifierType string, identifier string, date string, toc s
 		schedules[idx].ApplyOverlays(overlays, start_date)
 	}
 
-	//add the names of the origin and destination stations to the main schedule object
 	for idx, s := range schedules {
 
 		// Check for TRUST activation matching this schedule for the requested date
@@ -997,6 +1016,7 @@ func dbGetSchedules(identifierType string, identifier string, date string, toc s
 			if l.RecordIdentity == "LO" || l.RecordIdentity == "TB" {
 				originTiplocCode := l.TiplocCode
 				db.Where("tiploc_code = ?", originTiplocCode).First(&tiploc)
+				schedules[idx].OriginTiplocCode = originTiplocCode
 				schedules[idx].Origin = tiploc.TpsDescription
 				schedules[idx].TimeOfDepartureFromOriginTS, _ = combineDateAndTime(ts.Unix(), l.Departure)
 			}
@@ -1006,6 +1026,7 @@ func dbGetSchedules(identifierType string, identifier string, date string, toc s
 			if l.RecordIdentity == "LT" || l.RecordIdentity == "TF" {
 				destinationTiplocCode := l.TiplocCode
 				db.Where("tiploc_code = ?", destinationTiplocCode).First(&tiploc)
+				schedules[idx].DestinationTiplocCode = destinationTiplocCode
 				schedules[idx].Destination = tiploc.TpsDescription
 				schedules[idx].TimeOfArrivalAtDestinationTS, _ = combineDateAndTime(ts.Unix(), l.Arrival)
 			}

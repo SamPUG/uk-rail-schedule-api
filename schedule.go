@@ -61,6 +61,8 @@ type Schedule struct {
 
 	Origin                       string `json:"origin,omitempty"`
 	Destination                  string `json:"destination,omitempty"`
+	OriginTiplocCode             string `json:"origin_tiploc_code,omitempty"`
+	DestinationTiplocCode        string `json:"destination_tiploc_code,omitempty"`
 	TimeOfDepartureFromOriginTS  int64  `json:"time_of_departure_from_origin_ts"`
 	TimeOfArrivalAtDestinationTS int64  `json:"time_of_arrival_at_destination_ts"`
 
