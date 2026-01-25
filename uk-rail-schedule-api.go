@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"log/slog"
 	"net/http"
 	"os"
@@ -20,6 +21,7 @@ import (
 	"github.com/spf13/viper"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
 )
 
 type APIStatus struct {
@@ -556,7 +558,22 @@ func openDB(databaseFilename string) bool {
 	}
 
 	// Enable WAL mode and set busy timeout for better concurrency
-	db, err = gorm.Open(sqlite.Open(databaseFilename+"?_busy_timeout=5000&_journal_mode=WAL"), &gorm.Config{})
+	// Configure custom logger to ignore "record not found" errors
+	gormLoggerConfig := gormlogger.Config{
+		SlowThreshold:             200 * time.Millisecond,
+		LogLevel:                  gormlogger.Warn,
+		IgnoreRecordNotFoundError: true, // Don't log ErrRecordNotFound
+		ParameterizedQueries:      false,
+		Colorful:                  false,
+	}
+	gormLogger := gormlogger.New(
+		log.New(os.Stderr, "\r\n", log.LstdFlags),
+		gormLoggerConfig,
+	)
+
+	db, err = gorm.Open(sqlite.Open(databaseFilename+"?_busy_timeout=5000&_journal_mode=WAL"), &gorm.Config{
+		Logger: gormLogger,
+	})
 	if err != nil {
 		panic("failed to connect database")
 	}

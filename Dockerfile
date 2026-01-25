@@ -47,7 +47,7 @@ COPY update-schedule-feed.sh .
 RUN chmod +x update-schedule-feed.sh
 
 # Set up cron job to run update script daily at 2 AM
-RUN echo "0 2 * * * /app/update-schedule-feed.sh" > /etc/crontabs/root
+RUN echo "0 2 * * * cd /app && ./update-schedule-feed.sh" > /etc/crontabs/root
 
 # Copy startup script
 COPY start.sh .
