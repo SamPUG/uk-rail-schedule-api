@@ -3,8 +3,8 @@ FROM golang:1.21-alpine AS builder
 
 WORKDIR /app
 
-# Install build dependencies for CGO/SQLite
-RUN apk add --no-cache gcc musl-dev sqlite-dev
+# Install build dependencies for CGO
+RUN apk add --no-cache gcc musl-dev
 
 # Copy go mod files
 COPY go.mod go.sum ./
@@ -21,7 +21,6 @@ FROM alpine:latest
 
 # Install runtime dependencies
 RUN apk add --no-cache \
-    sqlite \
     curl \
     ca-certificates \
     tzdata \

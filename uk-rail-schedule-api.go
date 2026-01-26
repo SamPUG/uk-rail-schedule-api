@@ -19,7 +19,7 @@ import (
 	"github.com/go-stomp/stomp/v3"
 	slogchi "github.com/samber/slog-chi"
 	"github.com/spf13/viper"
-	"gorm.io/driver/sqlite"
+	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 )
@@ -81,7 +81,9 @@ func refreshSchedules(filename string, db *gorm.DB) {
 	tiplocs := []Tiploc{}
 
 	var existingSchedule Schedule
-	batchSize := 500
+	// Reduced batch size for MySQL - each schedule has many nested locations
+	// 500 schedules * ~20 locations * 14 fields = too many placeholders for MySQL
+	batchSize := 50
 
 	// Iterate over each line in the file
 	for scanner.Scan() {
@@ -113,7 +115,7 @@ func refreshSchedules(filename string, db *gorm.DB) {
 			schedules = append(schedules, schedule)
 			if len(schedules) >= batchSize {
 				db.Transaction(func(tx *gorm.DB) error {
-					return tx.Save(&schedules).Error
+					return tx.CreateInBatches(&schedules, batchSize).Error
 				})
 				schedules = nil
 			}
@@ -123,7 +125,7 @@ func refreshSchedules(filename string, db *gorm.DB) {
 			tiplocs = append(tiplocs, scheduleFeedRecord.Tiploc)
 			if len(tiplocs) >= batchSize {
 				db.Transaction(func(tx *gorm.DB) error {
-					return tx.Save(&tiplocs).Error
+					return tx.CreateInBatches(&tiplocs, batchSize).Error
 				})
 				tiplocs = nil
 			}
@@ -133,13 +135,13 @@ func refreshSchedules(filename string, db *gorm.DB) {
 
 	if len(schedules) > 0 {
 		db.Transaction(func(tx *gorm.DB) error {
-			return tx.Save(&schedules).Error
+			return tx.CreateInBatches(&schedules, batchSize).Error
 		})
 	}
 
 	if len(tiplocs) > 0 {
 		db.Transaction(func(tx *gorm.DB) error {
-			return tx.Save(&tiplocs).Error
+			return tx.CreateInBatches(&tiplocs, batchSize).Error
 		})
 	}
 
@@ -557,7 +559,6 @@ func openDB(databaseFilename string) bool {
 		logger.Info("Database doesn't exist - creating", "databaseFilename", databaseFilename)
 	}
 
-	// Enable WAL mode and set busy timeout for better concurrency
 	// Configure custom logger to ignore "record not found" errors
 	gormLoggerConfig := gormlogger.Config{
 		SlowThreshold:             200 * time.Millisecond,
@@ -571,26 +572,72 @@ func openDB(databaseFilename string) bool {
 		gormLoggerConfig,
 	)
 
-	db, err = gorm.Open(sqlite.Open(databaseFilename+"?_busy_timeout=5000&_journal_mode=WAL"), &gorm.Config{
+	// Build MySQL DSN from environment variables or config
+	dbHost := os.Getenv("DB_HOST")
+	if dbHost == "" {
+		dbHost = viper.GetString("db_host")
+		if dbHost == "" {
+			dbHost = "localhost"
+		}
+	}
+
+	dbPort := os.Getenv("DB_PORT")
+	if dbPort == "" {
+		dbPort = viper.GetString("db_port")
+		if dbPort == "" {
+			dbPort = "3306"
+		}
+	}
+
+	dbUser := os.Getenv("DB_USER")
+	if dbUser == "" {
+		dbUser = viper.GetString("db_user")
+		if dbUser == "" {
+			dbUser = "ukra"
+		}
+	}
+
+	dbPassword := os.Getenv("DB_PASSWORD")
+	if dbPassword == "" {
+		dbPassword = viper.GetString("db_password")
+		if dbPassword == "" {
+			dbPassword = "ukra"
+		}
+	}
+
+	dbName := os.Getenv("DB_NAME")
+	if dbName == "" {
+		dbName = viper.GetString("db_name")
+		if dbName == "" {
+			dbName = "ukra"
+		}
+	}
+
+	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?charset=utf8mb4&parseTime=True&loc=Local",
+		dbUser, dbPassword, dbHost, dbPort, dbName)
+
+	db, err = gorm.Open(mysql.Open(dsn), &gorm.Config{
 		Logger: gormLogger,
 	})
 	if err != nil {
-		panic("failed to connect database")
+		panic("failed to connect database: " + err.Error())
 	}
 
-	// Configure connection pool
+	// Configure connection pool for MySQL
 	sqlDB, err := db.DB()
 	if err != nil {
 		panic("failed to get database instance")
 	}
-	sqlDB.SetMaxOpenConns(1) // SQLite works best with 1 writer
-	sqlDB.SetMaxIdleConns(1)
+	sqlDB.SetMaxOpenConns(100) // MySQL can handle many concurrent connections
+	sqlDB.SetMaxIdleConns(10)
+	sqlDB.SetConnMaxLifetime(time.Hour)
 
 	if database_is_new {
-		db.AutoMigrate(&ScheduleLocation{}, &Schedule{}, &Tiploc{}, &Timetable{},
+		// Create parent tables first, then child tables with foreign keys
+		db.AutoMigrate(&Timetable{}, &Tiploc{}, &Schedule{},
 			&TrustActivation{}, &TrustCancellation{}, &TrustMovement{},
 			&TrustReinstatement{}, &TrustChangeOfOrigin{}, &TrustChangeOfIdentity{},
-			&TrustChangeOfLocation{})
+			&TrustChangeOfLocation{}, &ScheduleLocation{})
 	}
 
 	return true
@@ -601,6 +648,11 @@ func main() {
 	//set some default configuration
 	viper.SetDefault("stomp_url", "publicdatafeeds.networkrail.co.uk:61618")
 	viper.SetDefault("database", "ukra.db")
+	viper.SetDefault("db_host", "localhost")
+	viper.SetDefault("db_port", "3306")
+	viper.SetDefault("db_user", "ukra")
+	viper.SetDefault("db_password", "ukra")
+	viper.SetDefault("db_name", "ukra")
 	viper.SetDefault("schedule_feed_filename", "schedule.json")
 	viper.SetDefault("log_filename", "")
 	viper.SetDefault("log_level", "INFO")

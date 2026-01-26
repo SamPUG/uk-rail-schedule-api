@@ -74,7 +74,7 @@ type Schedule struct {
 
 type ScheduleLocation struct {
 	ID                   int    `gorm:"primaryKey"`
-	ScheduleID           uint64 `gorm:"index"`
+	ScheduleID           uint64 `gorm:"index;constraint:OnDelete:CASCADE"`
 	LocationType         string `json:"location_type,omitempty"`
 	RecordIdentity       string `json:"record_identity,omitempty"`
 	TiplocCode           string `gorm:"index" json:"tiploc_code,omitempty"`

@@ -8,7 +8,16 @@
 # stomp_login: ""
 # stomp_password: ""
 
-# Location of SQLite database - will be created if doesn't exist
+# MySQL Database Configuration
+# Can also be set via environment variables: DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME
+#
+#db_host: "localhost"
+#db_port: "3306"
+#db_user: "ukra"
+#db_password: "ukra"
+#db_name: "ukra"
+
+# Legacy SQLite database setting (no longer used with MySQL)
 #
 #database: "ukra.db"
 
